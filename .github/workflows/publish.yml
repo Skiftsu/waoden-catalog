@@ -61,8 +61,8 @@ jobs:
                   if not isinstance(url, str):
                       raise ValueError(f"{manifest}: screenshot URL must be a string")
                   parsed = urlsplit(url)
-                  if parsed.scheme != "https" or parsed.hostname != "i.postimg.cc":
-                      raise ValueError(f"{manifest}: expected a direct Postimages HTTPS URL")
+                  if parsed.scheme not in ("http", "https") or not parsed.hostname:
+                      raise ValueError(f"{manifest}: expected an absolute HTTP(S) screenshot URL")
 
               names.add(name)
               entries.append(entry)
