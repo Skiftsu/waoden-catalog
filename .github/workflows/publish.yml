@@ -1,0 +1,121 @@
+name: Publish catalog
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Generate catalog
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          from urllib.parse import urlsplit
+
+          output = Path("_site")
+          output.mkdir()
+          entries = []
+          names = set()
+          digest = hashlib.sha256()
+
+          for manifest in sorted(Path("packages").glob("*/metadata.json")):
+              if manifest.is_symlink() or manifest.parent.is_symlink():
+                  raise ValueError(f"{manifest}: symbolic links are not allowed")
+
+              entry = json.loads(manifest.read_text(encoding="utf-8"))
+
+              if not isinstance(entry, dict) or set(entry) != {"name", "screenshots"}:
+                  raise ValueError(f"{manifest}: expected only name and screenshots")
+
+              name = entry["name"]
+              if name != manifest.parent.name or name in names:
+                  raise ValueError(f"{manifest}: name must be unique and match the directory")
+
+              screenshots = entry["screenshots"]
+              if not isinstance(screenshots, list):
+                  raise ValueError(f"{manifest}: screenshots must be a list")
+
+              for url in screenshots:
+                  if not isinstance(url, str):
+                      raise ValueError(f"{manifest}: screenshot URL must be a string")
+                  parsed = urlsplit(url)
+                  if parsed.scheme != "https" or parsed.hostname != "i.postimg.cc":
+                      raise ValueError(f"{manifest}: expected a direct Postimages HTTPS URL")
+
+              names.add(name)
+              entries.append(entry)
+
+              for filename in ("README.md", "icon.svg", "icon.png"):
+                  source = manifest.parent / filename
+                  if source.is_symlink():
+                      raise ValueError(f"{source}: symbolic links are not allowed")
+                  if not source.exists():
+                      continue
+                  if not source.is_file():
+                      raise ValueError(f"{source}: expected a regular file")
+
+                  content = source.read_bytes()
+                  relative = Path("packages") / name / filename
+                  destination = output / relative
+                  destination.parent.mkdir(parents=True, exist_ok=True)
+                  destination.write_bytes(content)
+                  digest.update(relative.as_posix().encode("utf-8") + b"\0")
+                  digest.update(hashlib.sha256(content).digest())
+
+          if not entries:
+              raise ValueError("No package metadata found")
+
+          serialized = json.dumps(entries, ensure_ascii=False, sort_keys=True)
+          digest.update(serialized.encode("utf-8"))
+
+          catalog = {
+              "schemaVersion": 1,
+              "revision": digest.hexdigest(),
+              "entries": entries
+          }
+
+          (output / "catalog.json").write_text(
+              json.dumps(catalog, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8"
+          )
+          (output / "index.html").write_text(
+              '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+              '<title>Waoden Catalog</title></head><body>'
+              '<a href="catalog.json">Package catalog</a></body></html>',
+              encoding="utf-8"
+          )
+          PY
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
